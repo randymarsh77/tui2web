@@ -6,3 +6,10 @@
 
 # wasm-pack output if built directly into the example directory
 /example/pkg/
+
+# Node
+node_modules/
+
+# Nix
+result
+.direnv

@@ -50,7 +50,9 @@ tui2web/
 | Rust + Cargo | <https://rustup.rs> |
 | `wasm32-unknown-unknown` target | `rustup target add wasm32-unknown-unknown` |
 | `wasm-pack` | `cargo install wasm-pack` |
-| Python 3 (for local serving) | pre-installed on most systems |
+| Node.js (for local serving) | <https://nodejs.org> |
+
+> **Tip:** If you use [Nix](https://nixos.org), run `nix develop` to enter a dev shell with all prerequisites pre-installed.
 
 ## Quick start
 
@@ -59,7 +61,7 @@ tui2web/
 ./build.sh
 
 # 2. Serve the web directory (any static server works)
-cd web && python3 -m http.server 8080
+npx serve web -l 8080
 
 # 3. Open in the browser
 open http://localhost:8080

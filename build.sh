@@ -10,7 +10,7 @@
 #
 # Usage:
 #   ./build.sh            # build
-#   ./build.sh --serve    # build then serve locally on http://localhost:8080
+#   ./build.sh --serve    # build then serve locally via npx serve
 
 set -euo pipefail
 
@@ -44,11 +44,10 @@ if [[ "${1:-}" == "--serve" ]]; then
   echo "▶ Starting local HTTP server at http://localhost:8080 …"
   echo "  (Press Ctrl-C to stop)"
   echo ""
-  if command -v python3 &>/dev/null; then
-    cd "$WEB_DIR" && python3 -m http.server 8080
+  if command -v npx &>/dev/null; then
+    npx serve "$WEB_DIR" -l 8080
   else
-    echo "ERROR: python3 not found. Install Python 3 or use another HTTP server:"
-    echo "  cd web && npx serve -p 8080"
+    echo "ERROR: npx not found. Install Node.js or use another HTTP server."
     exit 1
   fi
 fi
