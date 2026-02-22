@@ -10,6 +10,50 @@ import init, { App } from './pkg/tui2web_example.js';
 const COLS = 80;
 const ROWS = 24;
 
+// ── localStorage-backed filesystem bridge ────────────────────────────────────
+// These helpers allow the WASM-side MemoryFilesystem to persist its state
+// across page reloads through the browser's localStorage.  The WASM app can
+// call `snapshot()` and pass the result to `Tui2webFs.save()`, then on next
+// load call `Tui2webFs.load()` and feed the entries into `restore()`.
+
+const FS_STORAGE_KEY = 'tui2web_fs';
+
+const Tui2webFs = {
+  /**
+   * Persist an array of `[path, base64Content]` pairs to localStorage.
+   * @param {Array<[string, string]>} entries
+   */
+  save(entries) {
+    try {
+      localStorage.setItem(FS_STORAGE_KEY, JSON.stringify(entries));
+    } catch (e) {
+      console.warn('tui2web: failed to persist filesystem to localStorage', e);
+    }
+  },
+
+  /**
+   * Load previously-persisted filesystem entries.
+   * @returns {Array<[string, string]>|null} entries or null if nothing saved.
+   */
+  load() {
+    try {
+      const raw = localStorage.getItem(FS_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      console.warn('tui2web: failed to load filesystem from localStorage', e);
+      return null;
+    }
+  },
+
+  /** Remove persisted filesystem state. */
+  clear() {
+    localStorage.removeItem(FS_STORAGE_KEY);
+  },
+};
+
+// Expose on window so WASM can call via js_sys / web_sys if needed.
+window.Tui2webFs = Tui2webFs;
+
 async function run() {
   const statusEl = document.getElementById('status');
 
