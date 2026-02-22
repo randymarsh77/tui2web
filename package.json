@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "serve": "serve web -l 8080"
+  },
+  "devDependencies": {
+    "serve": "^14.2.4"
+  }
+}
