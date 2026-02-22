@@ -469,6 +469,9 @@ impl GitRepository for InMemoryGitRepository {
 // ── Diff helpers ─────────────────────────────────────────────────────────────
 
 /// Produce hunks for a newly-added file (all lines are `+`).
+///
+/// Each line includes a trailing `\n` to match the unified-diff format
+/// expected by consumers such as *hunky*.
 fn diff_added(content: &str) -> Vec<DiffHunk> {
     let lines: Vec<String> = content.lines().map(|l| format!("+{l}\n")).collect();
     if lines.is_empty() {
@@ -482,6 +485,9 @@ fn diff_added(content: &str) -> Vec<DiffHunk> {
 }
 
 /// Produce hunks for a deleted file (all lines are `-`).
+///
+/// Each line includes a trailing `\n` to match the unified-diff format
+/// expected by consumers such as *hunky*.
 fn diff_deleted(content: &str) -> Vec<DiffHunk> {
     let lines: Vec<String> = content.lines().map(|l| format!("-{l}\n")).collect();
     if lines.is_empty() {

@@ -19,6 +19,8 @@ pub enum FsError {
     AlreadyExists(String),
     /// A parent directory in the path does not exist.
     ParentNotFound(String),
+    /// The directory is not empty.
+    NotEmpty(String),
     /// The operation expected a file but found a directory, or vice-versa.
     WrongKind(String),
 }
@@ -29,6 +31,7 @@ impl fmt::Display for FsError {
             FsError::NotFound(p) => write!(f, "not found: {p}"),
             FsError::AlreadyExists(p) => write!(f, "already exists: {p}"),
             FsError::ParentNotFound(p) => write!(f, "parent directory not found: {p}"),
+            FsError::NotEmpty(p) => write!(f, "directory not empty: {p}"),
             FsError::WrongKind(p) => write!(f, "wrong kind: {p}"),
         }
     }
@@ -248,7 +251,7 @@ impl Filesystem for MemoryFilesystem {
                 .iter()
                 .any(|d| d.starts_with(&prefix) && d != &norm);
         if has_children {
-            return Err(FsError::AlreadyExists(format!("{norm} is not empty")));
+            return Err(FsError::NotEmpty(norm));
         }
         self.dirs.remove(&norm);
         Ok(())
