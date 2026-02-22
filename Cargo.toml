@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/tui2web", "example"]
+resolver = "2"

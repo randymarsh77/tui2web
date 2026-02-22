@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>tui2web – TUI apps in the browser</title>
+  <!-- xterm.js -->
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css"
+  />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1e1e2e;
+      color: #cdd6f4;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 24px 16px;
+      gap: 16px;
+    }
+
+    header {
+      text-align: center;
+    }
+    header h1 {
+      font-size: 1.8rem;
+      color: #89b4fa;
+      letter-spacing: 0.05em;
+    }
+    header p {
+      color: #a6adc8;
+      margin-top: 4px;
+      font-size: 0.95rem;
+    }
+
+    #terminal-wrapper {
+      border: 1px solid #313244;
+      border-radius: 6px;
+      overflow: hidden;
+      /* xterm.js sets its own size; we just contain it */
+    }
+
+    #status {
+      color: #6c7086;
+      font-size: 0.85rem;
+    }
+
+    footer {
+      color: #585b70;
+      font-size: 0.8rem;
+    }
+    footer a { color: #89b4fa; text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>tui2web</h1>
+    <p>Ratatui TUI applications compiled to WebAssembly, running in the browser</p>
+  </header>
+
+  <div id="terminal-wrapper"></div>
+  <p id="status">Loading WebAssembly module…</p>
+
+  <footer>
+    <a href="https://github.com/randymarsh77/tui2web" target="_blank">GitHub</a>
+    &nbsp;·&nbsp; built with
+    <a href="https://ratatui.rs" target="_blank">ratatui</a> +
+    <a href="https://xtermjs.org" target="_blank">xterm.js</a>
+  </footer>
+
+  <!-- xterm.js + fit addon from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

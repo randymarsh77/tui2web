@@ -1,0 +1,12 @@
+[package]
+name = "tui2web"
+version = "0.1.0"
+edition = "2021"
+description = "Run ratatui TUI applications in the browser via WebAssembly"
+license = "MIT"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+ratatui = { version = "0.26", default-features = false }
