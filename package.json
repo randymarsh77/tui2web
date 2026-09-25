@@ -1,9 +1,38 @@
 {
-  "private": true,
+  "name": "@tui2web/runtime",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-local host for adapted Ratatui WASM apps",
+  "license": "MIT",
+  "files": ["dist"],
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./style.css": "./dist/style.css",
+    "./worker.js": "./dist/worker.js",
+    "./frame.js": "./dist/frame.js"
+  },
   "scripts": {
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
+    "build:wasm": "wasm-pack build example --target web --out-dir ../web/pkg --release",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:terminal": "cargo run --quiet -p tui2web --example frames | node scripts/check-terminal.mjs",
+    "test:e2e": "playwright test",
     "serve": "serve web -l 8080"
   },
+  "dependencies": {
+    "@xterm/xterm": "5.5.0",
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/addon-unicode11": "0.8.0"
+  },
   "devDependencies": {
-    "serve": "^14.2.4"
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.0.0",
+    "@xterm/headless": "5.5.0",
+    "esbuild": "^0.25.0",
+    "fake-indexeddb": "^6.0.0",
+    "serve": "^14.2.4",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
   }
 }

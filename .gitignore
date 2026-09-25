@@ -9,6 +9,11 @@
 
 # Node
 node_modules/
+/dist/
+/web/runtime/
+/web/main.js
+/test-results/
+/playwright-report/
 
 # Nix
 result

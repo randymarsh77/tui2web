@@ -1,82 +1,51 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>tui2web – TUI apps in the browser</title>
-  <!-- xterm.js -->
-  <link
-    rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css"
-  />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>tui2web file playground</title>
+  <link rel="stylesheet" href="./runtime/style.css">
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      background: #1e1e2e;
-      color: #cdd6f4;
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      min-height: 100vh;
-      padding: 24px 16px;
-      gap: 16px;
-    }
-
-    header {
-      text-align: center;
-    }
-    header h1 {
-      font-size: 1.8rem;
-      color: #89b4fa;
-      letter-spacing: 0.05em;
-    }
-    header p {
-      color: #a6adc8;
-      margin-top: 4px;
-      font-size: 0.95rem;
-    }
-
-    #terminal-wrapper {
-      border: 1px solid #313244;
-      border-radius: 6px;
-      overflow: hidden;
-      /* xterm.js sets its own size; we just contain it */
-    }
-
-    #status {
-      color: #6c7086;
-      font-size: 0.85rem;
-    }
-
-    footer {
-      color: #585b70;
-      font-size: 0.8rem;
-    }
-    footer a { color: #89b4fa; text-decoration: none; }
-    footer a:hover { text-decoration: underline; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #0d1117; color: #d6e0ee; font: 15px system-ui, sans-serif; }
+    h1 { margin: 0 0 8px; color: #7dd3fc; }
+    p { max-width: 1000px; line-height: 1.5; }
+    button, .import { background: #263449; color: #edf5ff; border: 1px solid #52647a; padding: 8px 12px; border-radius: 5px; cursor: pointer; font: inherit; }
+    button:hover, .import:hover { background: #354c69; }
+    button:disabled { opacity: .5; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .terminal { height: 400px; width: 100%; overflow: hidden; background: #141821; padding: 4px; border: 1px solid #52647a; }
+    article { margin: 24px 0; }
+    .status { display: block; min-height: 24px; margin-top: 8px; overflow-wrap: anywhere; }
+    .error { color: #fda4af; }
+    input[type=file] { display: none; }
+    code { color: #a5d6ff; }
   </style>
 </head>
 <body>
-  <header>
-    <h1>tui2web</h1>
-    <p>Ratatui TUI applications compiled to WebAssembly, running in the browser</p>
-  </header>
-
-  <div id="terminal-wrapper"></div>
-  <p id="status">Loading WebAssembly module…</p>
-
-  <footer>
-    <a href="https://github.com/randymarsh77/tui2web" target="_blank">GitHub</a>
-    &nbsp;·&nbsp; built with
-    <a href="https://ratatui.rs" target="_blank">ratatui</a> +
-    <a href="https://xtermjs.org" target="_blank">xterm.js</a>
-  </footer>
-
-  <!-- xterm.js + fit addon from CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <h1>tui2web / local file playground</h1>
+  <p>A real Rust/Ratatui editor in a WASM Worker. Type or paste Unicode, click a file, use Tab to switch (and save), Ctrl+S to save, Ctrl+N to create. Shift+drag selects terminal text. Save is acknowledged only after IndexedDB commits. Unsaved edits are lost on restart.</p>
+  <p><strong>Trust boundary:</strong> the default demo loads our trusted module. The isolated option runs app glue in an opaque-origin, network-denied Worker; the parent only stores validated virtual-file snapshots. No shell, backend or native filesystem.</p>
+  <div class="toolbar">
+    <button id="add">Add independent editor</button>
+    <button id="isolated">Add isolated editor</button>
+  </div>
+  <main id="editors"></main>
+  <template id="editor-template">
+    <article>
+      <h2></h2>
+      <div class="toolbar">
+        <button data-action="save">Save file</button>
+        <button data-action="export">Export JSON</button>
+        <label class="import">Import JSON<input type="file" accept=".json,application/json"></label>
+        <button data-action="restart">Restart</button>
+        <button data-action="reset">Reset fixtures</button>
+        <button data-action="dispose">Dispose</button>
+      </div>
+      <div class="terminal"></div>
+      <output class="status" aria-live="polite">Starting...</output>
+    </article>
+  </template>
   <script type="module" src="./main.js"></script>
 </body>
 </html>

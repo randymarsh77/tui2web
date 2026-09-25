@@ -1,592 +1,421 @@
-//! Virtual filesystem abstraction for running TUI applications in the browser.
-//!
-//! Provides a [`Filesystem`] trait that abstracts file operations, plus an
-//! [`MemoryFilesystem`] implementation backed by in-memory storage.  When
-//! running under WebAssembly the memory filesystem can optionally be
-//! persisted to `localStorage` via the JavaScript bridge in `web/main.js`.
-
+//! Synchronous virtual files; no interception of `std::fs`. Snapshots are portable JSON.
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-// ── Error types ──────────────────────────────────────────────────────────────
+pub const MAX_BYTES: usize = 1024 * 1024;
+pub const MAX_ENTRIES: usize = 4096;
+pub const MAX_PATH_BYTES: usize = 1024;
 
-/// Errors produced by [`Filesystem`] operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsError {
-    /// The requested path was not found.
     NotFound(String),
-    /// The path already exists.
     AlreadyExists(String),
-    /// A parent directory in the path does not exist.
     ParentNotFound(String),
-    /// The directory is not empty.
     NotEmpty(String),
-    /// The operation expected a file but found a directory, or vice-versa.
     WrongKind(String),
+    InvalidPath(String),
+    InvalidEncoding(String),
+    InvalidSnapshot(String),
+    LimitExceeded,
 }
-
 impl fmt::Display for FsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FsError::NotFound(p) => write!(f, "not found: {p}"),
-            FsError::AlreadyExists(p) => write!(f, "already exists: {p}"),
-            FsError::ParentNotFound(p) => write!(f, "parent directory not found: {p}"),
-            FsError::NotEmpty(p) => write!(f, "directory not empty: {p}"),
-            FsError::WrongKind(p) => write!(f, "wrong kind: {p}"),
-        }
+        write!(f, "{self:?}")
     }
 }
-
 impl std::error::Error for FsError {}
 
-// ── Data types ───────────────────────────────────────────────────────────────
-
-/// Entry returned by [`Filesystem::read_dir`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DirEntry {
-    /// Name of the entry (not the full path).
     pub name: String,
-    /// Whether this entry is a directory.
     pub is_dir: bool,
 }
-
-/// Metadata about a file or directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Metadata {
-    /// `true` when the path is a directory.
     pub is_dir: bool,
-    /// Size in bytes (always 0 for directories).
     pub len: u64,
 }
 
-// ── Trait ─────────────────────────────────────────────────────────────────────
-
-/// Abstraction over filesystem operations.
-///
-/// Implementations must treat paths as forward-slash separated, UTF-8 strings.
-/// A leading `/` is optional; paths are normalised internally.
+/// Absolute and relative paths both start at the virtual root. `..` above root is invalid.
+/// Renames never overwrite an existing destination. Boolean probes return false for invalid paths;
+/// use `metadata` when callers need the typed error.
 pub trait Filesystem {
-    /// Read the entire contents of a file.
     fn read_file(&self, path: &str) -> Result<Vec<u8>, FsError>;
-
-    /// Read a file as a UTF-8 string (convenience wrapper).
     fn read_to_string(&self, path: &str) -> Result<String, FsError> {
-        let bytes = self.read_file(path)?;
-        String::from_utf8(bytes).map_err(|_| FsError::WrongKind(path.to_string()))
+        String::from_utf8(self.read_file(path)?).map_err(|_| FsError::InvalidEncoding(path.into()))
     }
-
-    /// Create or overwrite a file with the given contents.
-    /// Parent directories must already exist.
     fn write_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError>;
-
-    /// Remove a file.  Returns an error if the path is a directory or does not exist.
     fn remove_file(&mut self, path: &str) -> Result<(), FsError>;
-
-    /// Remove a directory.  Returns an error if the directory is not empty.
     fn remove_dir(&mut self, path: &str) -> Result<(), FsError>;
-
-    /// Check whether a path exists (file or directory).
     fn exists(&self, path: &str) -> bool;
-
-    /// Check whether a path is a directory.
     fn is_dir(&self, path: &str) -> bool;
-
-    /// Check whether a path is a file.
     fn is_file(&self, path: &str) -> bool;
-
-    /// Create a single directory.  The parent must already exist.
     fn create_dir(&mut self, path: &str) -> Result<(), FsError>;
-
-    /// Recursively create a directory and all missing parents.
     fn create_dir_all(&mut self, path: &str) -> Result<(), FsError>;
-
-    /// List the immediate children of a directory.
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, FsError>;
-
-    /// Return metadata for a path.
     fn metadata(&self, path: &str) -> Result<Metadata, FsError>;
-
-    /// List every file path in the filesystem (non-recursive convenience).
     fn list_files(&self) -> Vec<String>;
-
-    /// Rename / move a file or directory.
     fn rename(&mut self, from: &str, to: &str) -> Result<(), FsError>;
 }
 
-// ── In-memory implementation ─────────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    pub version: u32,
+    /// Canonical relative paths; includes the root as `""`, including empty directories.
+    pub directories: Vec<String>,
+    pub files: Vec<(String, Vec<u8>)>,
+}
 
-/// A fully in-memory [`Filesystem`].
-///
-/// Files are stored in a sorted map keyed by normalised path, and directories
-/// are tracked separately so that empty directories are preserved.
 #[derive(Debug, Clone)]
 pub struct MemoryFilesystem {
     files: BTreeMap<String, Vec<u8>>,
     dirs: BTreeSet<String>,
 }
-
 impl Default for MemoryFilesystem {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl MemoryFilesystem {
-    /// Create a new, empty filesystem.  The root directory `/` is created
-    /// implicitly.
     pub fn new() -> Self {
-        let mut dirs = BTreeSet::new();
-        dirs.insert(String::new()); // root
-        MemoryFilesystem {
+        Self {
             files: BTreeMap::new(),
-            dirs,
+            dirs: BTreeSet::from([String::new()]),
         }
     }
-
-    /// Serialise the entire filesystem to a flat `Vec` of `(path, contents)`
-    /// pairs.  Useful for persisting to `localStorage`.
-    pub fn snapshot(&self) -> Vec<(String, Vec<u8>)> {
-        self.files.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            version: 1,
+            directories: self.dirs.iter().cloned().collect(),
+            files: self
+                .files
+                .iter()
+                .map(|(p, b)| (p.clone(), b.clone()))
+                .collect(),
+        }
     }
-
-    /// Restore the filesystem from a snapshot created by [`snapshot`].
-    pub fn restore(&mut self, entries: Vec<(String, Vec<u8>)>) {
-        self.files.clear();
-        self.dirs.clear();
-        self.dirs.insert(String::new()); // root
-
-        for (path, content) in entries {
-            let norm = normalise(&path);
-            // Ensure all parent directories exist.
-            let mut prefix = String::new();
-            for part in norm.split('/') {
-                if !prefix.is_empty() || !part.is_empty() {
-                    if !prefix.is_empty() {
-                        prefix.push('/');
-                    }
-                    prefix.push_str(part);
-                }
-                // Don't insert the file itself as a dir.
-                if prefix != norm {
-                    self.dirs.insert(prefix.clone());
-                }
+    /// Validate completely before replacing any state.
+    pub fn restore(&mut self, snapshot: Snapshot) -> Result<(), FsError> {
+        if snapshot.version != 1 {
+            return Err(FsError::InvalidSnapshot("unsupported version".into()));
+        }
+        if snapshot.directories.len() + snapshot.files.len() > MAX_ENTRIES {
+            return Err(FsError::LimitExceeded);
+        }
+        let mut next = Self {
+            files: BTreeMap::new(),
+            dirs: BTreeSet::new(),
+        };
+        for path in snapshot.directories {
+            if normalise(&path)? != path || !next.dirs.insert(path) {
+                return Err(FsError::InvalidSnapshot(
+                    "noncanonical or duplicate directory".into(),
+                ));
             }
-            self.files.insert(norm, content);
+        }
+        for (path, bytes) in snapshot.files {
+            if normalise(&path)? != path
+                || next.dirs.contains(&path)
+                || next.files.insert(path, bytes).is_some()
+            {
+                return Err(FsError::InvalidSnapshot(
+                    "noncanonical, duplicate or conflicting file".into(),
+                ));
+            }
+        }
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+    fn validate(&self) -> Result<(), FsError> {
+        if self.files.len() + self.dirs.len() > MAX_ENTRIES
+            || self.files.values().map(Vec::len).sum::<usize>() > MAX_BYTES
+        {
+            return Err(FsError::LimitExceeded);
+        }
+        if !self.dirs.contains("") {
+            return Err(FsError::InvalidSnapshot("missing root".into()));
+        }
+        for path in self.files.keys().chain(self.dirs.iter()) {
+            if path.len() > MAX_PATH_BYTES {
+                return Err(FsError::LimitExceeded);
+            }
+            if !path.is_empty() && !self.dirs.contains(parent(path)) {
+                return Err(FsError::ParentNotFound(path.clone()));
+            }
+        }
+        Ok(())
+    }
+    fn require_dir(&self, path: &str) -> Result<(), FsError> {
+        if self.dirs.contains(path) {
+            Ok(())
+        } else if self.files.contains_key(path) {
+            Err(FsError::WrongKind(path.into()))
+        } else {
+            Err(FsError::NotFound(path.into()))
         }
     }
 }
 
-/// Normalise a path: strip leading `/`, collapse duplicate `/`.
-fn normalise(path: &str) -> String {
-    path.trim_start_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("/")
+fn normalise(path: &str) -> Result<String, FsError> {
+    if path.len() > MAX_PATH_BYTES || path.chars().any(|c| c.is_control() || c == '\\') {
+        return Err(FsError::InvalidPath(path.into()));
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts
+                    .pop()
+                    .ok_or_else(|| FsError::InvalidPath(path.into()))?;
+            }
+            _ => parts.push(part),
+        }
+    }
+    Ok(parts.join("/"))
 }
-
-/// Return the parent of a normalised path (empty string = root).
-fn parent(path: &str) -> Option<String> {
-    if path.is_empty() {
-        return None; // root has no parent
-    }
-    match path.rfind('/') {
-        Some(pos) => Some(path[..pos].to_string()),
-        None => Some(String::new()), // parent is root
-    }
+fn parent(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(p, _)| p)
 }
 
 impl Filesystem for MemoryFilesystem {
     fn read_file(&self, path: &str) -> Result<Vec<u8>, FsError> {
-        let norm = normalise(path);
-        self.files
-            .get(&norm)
-            .cloned()
-            .ok_or_else(|| FsError::NotFound(norm))
+        let p = normalise(path)?;
+        if self.dirs.contains(&p) {
+            return Err(FsError::WrongKind(p));
+        }
+        self.files.get(&p).cloned().ok_or(FsError::NotFound(p))
     }
-
     fn write_file(&mut self, path: &str, content: &[u8]) -> Result<(), FsError> {
-        let norm = normalise(path);
-        if self.dirs.contains(&norm) {
-            return Err(FsError::WrongKind(norm));
+        let p = normalise(path)?;
+        if self.dirs.contains(&p) {
+            return Err(FsError::WrongKind(p));
         }
-        // Check parent exists.
-        if let Some(p) = parent(&norm) {
-            if !p.is_empty() && !self.dirs.contains(&p) {
-                return Err(FsError::ParentNotFound(norm));
-            }
+        if !self.dirs.contains(parent(&p)) {
+            return Err(FsError::ParentNotFound(p));
         }
-        self.files.insert(norm, content.to_vec());
+        let used = self.files.values().map(Vec::len).sum::<usize>();
+        let old = self.files.get(&p).map_or(0, Vec::len);
+        if content.len() > MAX_BYTES
+            || used - old + content.len() > MAX_BYTES
+            || (!self.files.contains_key(&p) && self.files.len() + self.dirs.len() >= MAX_ENTRIES)
+        {
+            return Err(FsError::LimitExceeded);
+        }
+        self.files.insert(p, content.to_vec());
         Ok(())
     }
-
     fn remove_file(&mut self, path: &str) -> Result<(), FsError> {
-        let norm = normalise(path);
-        if self.dirs.contains(&norm) {
-            return Err(FsError::WrongKind(norm));
+        let p = normalise(path)?;
+        if self.dirs.contains(&p) {
+            return Err(FsError::WrongKind(p));
         }
         self.files
-            .remove(&norm)
+            .remove(&p)
             .map(|_| ())
-            .ok_or_else(|| FsError::NotFound(norm))
+            .ok_or(FsError::NotFound(p))
     }
-
     fn remove_dir(&mut self, path: &str) -> Result<(), FsError> {
-        let norm = normalise(path);
-        if !self.dirs.contains(&norm) {
-            return Err(FsError::NotFound(norm));
+        let p = normalise(path)?;
+        if p.is_empty() {
+            return Err(FsError::InvalidPath(p));
         }
-        // Check non-empty.
-        let prefix = if norm.is_empty() {
-            String::new()
-        } else {
-            format!("{norm}/")
-        };
-        let has_children = self
-            .files
-            .keys()
-            .any(|k| k.starts_with(&prefix) && k != &norm)
-            || self
-                .dirs
-                .iter()
-                .any(|d| d.starts_with(&prefix) && d != &norm);
-        if has_children {
-            return Err(FsError::NotEmpty(norm));
+        self.require_dir(&p)?;
+        if !self.read_dir(&p)?.is_empty() {
+            return Err(FsError::NotEmpty(p));
         }
-        self.dirs.remove(&norm);
+        self.dirs.remove(&p);
         Ok(())
     }
-
     fn exists(&self, path: &str) -> bool {
-        let norm = normalise(path);
-        self.files.contains_key(&norm) || self.dirs.contains(&norm)
+        self.metadata(path).is_ok()
     }
-
     fn is_dir(&self, path: &str) -> bool {
-        let norm = normalise(path);
-        self.dirs.contains(&norm)
+        self.metadata(path).is_ok_and(|m| m.is_dir)
     }
-
     fn is_file(&self, path: &str) -> bool {
-        let norm = normalise(path);
-        self.files.contains_key(&norm)
+        self.metadata(path).is_ok_and(|m| !m.is_dir)
     }
-
     fn create_dir(&mut self, path: &str) -> Result<(), FsError> {
-        let norm = normalise(path);
-        if self.dirs.contains(&norm) || self.files.contains_key(&norm) {
-            return Err(FsError::AlreadyExists(norm));
+        let p = normalise(path)?;
+        if self.exists(&p) {
+            return Err(FsError::AlreadyExists(p));
         }
-        if let Some(p) = parent(&norm) {
-            if !p.is_empty() && !self.dirs.contains(&p) {
-                return Err(FsError::ParentNotFound(norm));
-            }
+        if !self.dirs.contains(parent(&p)) {
+            return Err(FsError::ParentNotFound(p));
         }
-        self.dirs.insert(norm);
+        if self.dirs.len() + self.files.len() >= MAX_ENTRIES {
+            return Err(FsError::LimitExceeded);
+        }
+        self.dirs.insert(p);
         Ok(())
     }
-
     fn create_dir_all(&mut self, path: &str) -> Result<(), FsError> {
-        let norm = normalise(path);
-        if norm.is_empty() {
-            return Ok(()); // root always exists
-        }
-        let parts: Vec<&str> = norm.split('/').collect();
+        let p = normalise(path)?;
+        let mut next = self.clone();
         let mut current = String::new();
-        for part in &parts {
+        for part in p.split('/').filter(|s| !s.is_empty()) {
             if !current.is_empty() {
                 current.push('/');
             }
             current.push_str(part);
-            if self.files.contains_key(&current) {
+            if next.files.contains_key(&current) {
                 return Err(FsError::WrongKind(current));
             }
-            self.dirs.insert(current.clone());
+            next.dirs.insert(current.clone());
         }
+        next.validate()?;
+        *self = next;
         Ok(())
     }
-
     fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, FsError> {
-        let norm = normalise(path);
-        if !self.dirs.contains(&norm) {
-            return Err(FsError::NotFound(norm));
-        }
-        let prefix = if norm.is_empty() {
-            String::new()
-        } else {
-            format!("{norm}/")
-        };
-
-        let mut entries = BTreeSet::new();
-
-        for key in self.files.keys() {
-            if let Some(rest) = key.strip_prefix(&prefix) {
-                if !rest.is_empty() {
-                    if let Some(name) = rest.split('/').next() {
-                        entries.insert(DirEntry {
-                            name: name.to_string(),
-                            is_dir: false,
-                        });
-                    }
-                }
-            } else if prefix.is_empty() && !key.contains('/') && !key.is_empty() {
-                entries.insert(DirEntry {
-                    name: key.clone(),
-                    is_dir: false,
-                });
-            }
-        }
-
-        for dir in &self.dirs {
-            if let Some(rest) = dir.strip_prefix(&prefix) {
-                if !rest.is_empty() && !rest.contains('/') {
-                    // Override the is_dir flag if we already have this name from files.
-                    entries.replace(DirEntry {
-                        name: rest.to_string(),
-                        is_dir: true,
+        let p = normalise(path)?;
+        self.require_dir(&p)?;
+        let mut entries = Vec::new();
+        for (paths, is_dir) in [
+            (self.files.keys().collect::<Vec<_>>(), false),
+            (self.dirs.iter().collect::<Vec<_>>(), true),
+        ] {
+            for child in paths {
+                if !child.is_empty() && parent(child) == p {
+                    entries.push(DirEntry {
+                        name: child.rsplit('/').next().unwrap().into(),
+                        is_dir,
                     });
                 }
-            } else if prefix.is_empty() && !dir.contains('/') && !dir.is_empty() {
-                entries.replace(DirEntry {
-                    name: dir.clone(),
-                    is_dir: true,
-                });
             }
         }
-
-        Ok(entries.into_iter().collect())
+        entries.sort();
+        Ok(entries)
     }
-
     fn metadata(&self, path: &str) -> Result<Metadata, FsError> {
-        let norm = normalise(path);
-        if self.dirs.contains(&norm) {
-            Ok(Metadata { is_dir: true, len: 0 })
-        } else if let Some(data) = self.files.get(&norm) {
+        let p = normalise(path)?;
+        if self.dirs.contains(&p) {
+            Ok(Metadata {
+                is_dir: true,
+                len: 0,
+            })
+        } else if let Some(b) = self.files.get(&p) {
             Ok(Metadata {
                 is_dir: false,
-                len: data.len() as u64,
+                len: b.len() as u64,
             })
         } else {
-            Err(FsError::NotFound(norm))
+            Err(FsError::NotFound(p))
         }
     }
-
     fn list_files(&self) -> Vec<String> {
         self.files.keys().cloned().collect()
     }
-
     fn rename(&mut self, from: &str, to: &str) -> Result<(), FsError> {
-        let from_norm = normalise(from);
-        let to_norm = normalise(to);
-
-        if self.files.contains_key(&from_norm) {
-            // Rename a file.
-            if let Some(p) = parent(&to_norm) {
-                if !p.is_empty() && !self.dirs.contains(&p) {
-                    return Err(FsError::ParentNotFound(to_norm));
-                }
-            }
-            let data = self.files.remove(&from_norm).unwrap();
-            self.files.insert(to_norm, data);
-            Ok(())
-        } else if self.dirs.contains(&from_norm) {
-            // Rename a directory (and all children).
-            let old_prefix = if from_norm.is_empty() {
-                String::new()
-            } else {
-                format!("{from_norm}/")
-            };
-            let new_prefix = if to_norm.is_empty() {
-                String::new()
-            } else {
-                format!("{to_norm}/")
-            };
-
-            // Collect affected paths.
-            let file_moves: Vec<(String, String)> = self
-                .files
-                .keys()
-                .filter(|k| k.starts_with(&old_prefix))
-                .map(|k| {
-                    let rest = &k[old_prefix.len()..];
-                    (k.clone(), format!("{new_prefix}{rest}"))
-                })
-                .collect();
-            let dir_moves: Vec<(String, String)> = self
-                .dirs
-                .iter()
-                .filter(|d| **d == from_norm || d.starts_with(&old_prefix))
-                .map(|d| {
-                    if *d == from_norm {
-                        (d.clone(), to_norm.clone())
-                    } else {
-                        let rest = &d[old_prefix.len()..];
-                        (d.clone(), format!("{new_prefix}{rest}"))
-                    }
-                })
-                .collect();
-
-            for (old, new) in file_moves {
-                let data = self.files.remove(&old).unwrap();
-                self.files.insert(new, data);
-            }
-            for (old, new) in dir_moves {
-                self.dirs.remove(&old);
-                self.dirs.insert(new);
-            }
-
-            Ok(())
-        } else {
-            Err(FsError::NotFound(from_norm))
+        let from = normalise(from)?;
+        let to = normalise(to)?;
+        if from.is_empty() || to.is_empty() {
+            return Err(FsError::InvalidPath("root rename".into()));
         }
+        self.metadata(&from)?;
+        if from == to {
+            return Ok(());
+        }
+        if to.starts_with(&format!("{from}/")) {
+            return Err(FsError::InvalidPath(to));
+        }
+        if self.exists(&to) {
+            return Err(FsError::AlreadyExists(to));
+        }
+        if !self.dirs.contains(parent(&to)) {
+            return Err(FsError::ParentNotFound(to));
+        }
+        let prefix = format!("{from}/");
+        let move_path = |p: &String| {
+            if p == &from {
+                to.clone()
+            } else if let Some(rest) = p.strip_prefix(&prefix) {
+                format!("{to}/{rest}")
+            } else {
+                p.clone()
+            }
+        };
+        let next = Self {
+            files: self
+                .files
+                .iter()
+                .map(|(p, b)| (move_path(p), b.clone()))
+                .collect(),
+            dirs: self.dirs.iter().map(move_path).collect(),
+        };
+        next.validate()?;
+        *self = next;
+        Ok(())
     }
 }
-
-// We need Ord/PartialOrd for BTreeSet.
-impl PartialOrd for DirEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for DirEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.name.cmp(&other.name)
-    }
-}
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn create_and_read_file() {
+    fn paths_and_encoding() {
         let mut fs = MemoryFilesystem::new();
-        fs.write_file("hello.txt", b"world").unwrap();
-        assert_eq!(fs.read_file("hello.txt").unwrap(), b"world");
-        assert_eq!(fs.read_to_string("hello.txt").unwrap(), "world");
+        fs.create_dir_all("/a//./b/..").unwrap();
+        fs.write_file("a/./file", &[255]).unwrap();
+        assert!(matches!(
+            fs.read_to_string("/a/file"),
+            Err(FsError::InvalidEncoding(_))
+        ));
+        assert!(matches!(fs.metadata("../a"), Err(FsError::InvalidPath(_))));
+        assert!(fs.write_file("bad\0path", b"").is_err());
+        assert!(fs.read_file("a").is_err());
+        assert!(fs.remove_dir("/").is_err());
     }
-
     #[test]
-    fn write_requires_parent_directory() {
+    fn atomic_renames_and_direct_children() {
         let mut fs = MemoryFilesystem::new();
-        let err = fs.write_file("a/b.txt", b"data").unwrap_err();
-        assert!(matches!(err, FsError::ParentNotFound(_)));
+        fs.create_dir_all("a/b/empty").unwrap();
+        fs.write_file("a/b/file", b"ok").unwrap();
+        assert_eq!(
+            fs.read_dir("a").unwrap(),
+            vec![DirEntry {
+                name: "b".into(),
+                is_dir: true
+            }]
+        );
+        let before = fs.snapshot();
+        for (a, b) in [
+            ("/", "root"),
+            ("a", "a/b/c"),
+            ("a", "missing/c"),
+            ("a/b", "a"),
+        ] {
+            assert!(fs.rename(a, b).is_err());
+            assert_eq!(before, fs.snapshot());
+        }
+        fs.rename("a", "moved").unwrap();
+        assert_eq!(fs.read_file("moved/b/file").unwrap(), b"ok");
+        assert!(fs.is_dir("moved/b/empty"));
     }
-
     #[test]
-    fn create_dir_all_and_write() {
+    fn snapshots_are_complete_validated_and_atomic() {
         let mut fs = MemoryFilesystem::new();
-        fs.create_dir_all("a/b/c").unwrap();
-        fs.write_file("a/b/c/f.txt", b"ok").unwrap();
-        assert_eq!(fs.read_file("a/b/c/f.txt").unwrap(), b"ok");
-        assert!(fs.is_dir("a"));
-        assert!(fs.is_dir("a/b"));
-        assert!(fs.is_dir("a/b/c"));
-    }
-
-    #[test]
-    fn remove_file_and_exists() {
-        let mut fs = MemoryFilesystem::new();
-        fs.write_file("f.txt", b"x").unwrap();
-        assert!(fs.exists("f.txt"));
-        assert!(fs.is_file("f.txt"));
-        fs.remove_file("f.txt").unwrap();
-        assert!(!fs.exists("f.txt"));
-    }
-
-    #[test]
-    fn read_dir_lists_children() {
-        let mut fs = MemoryFilesystem::new();
-        fs.create_dir("src").unwrap();
-        fs.write_file("src/a.rs", b"").unwrap();
-        fs.write_file("src/b.rs", b"").unwrap();
-        fs.create_dir("src/sub").unwrap();
-
-        let entries = fs.read_dir("src").unwrap();
-        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"a.rs"));
-        assert!(names.contains(&"b.rs"));
-        assert!(names.contains(&"sub"));
-        assert!(entries.iter().find(|e| e.name == "sub").unwrap().is_dir);
-    }
-
-    #[test]
-    fn metadata_works() {
-        let mut fs = MemoryFilesystem::new();
-        fs.create_dir("d").unwrap();
-        fs.write_file("d/f.txt", b"hello").unwrap();
-
-        let md = fs.metadata("d").unwrap();
-        assert!(md.is_dir);
-        assert_eq!(md.len, 0);
-
-        let mf = fs.metadata("d/f.txt").unwrap();
-        assert!(!mf.is_dir);
-        assert_eq!(mf.len, 5);
-    }
-
-    #[test]
-    fn leading_slash_normalisation() {
-        let mut fs = MemoryFilesystem::new();
-        fs.write_file("/root.txt", b"data").unwrap();
-        assert_eq!(fs.read_file("root.txt").unwrap(), b"data");
-        assert_eq!(fs.read_file("/root.txt").unwrap(), b"data");
-    }
-
-    #[test]
-    fn list_files_returns_all() {
-        let mut fs = MemoryFilesystem::new();
-        fs.create_dir("src").unwrap();
-        fs.write_file("src/main.rs", b"fn main() {}").unwrap();
-        fs.write_file("README.md", b"# hi").unwrap();
-        let files = fs.list_files();
-        assert_eq!(files.len(), 2);
-        assert!(files.contains(&"README.md".to_string()));
-        assert!(files.contains(&"src/main.rs".to_string()));
-    }
-
-    #[test]
-    fn rename_file() {
-        let mut fs = MemoryFilesystem::new();
-        fs.write_file("old.txt", b"content").unwrap();
-        fs.rename("old.txt", "new.txt").unwrap();
-        assert!(!fs.exists("old.txt"));
-        assert_eq!(fs.read_file("new.txt").unwrap(), b"content");
-    }
-
-    #[test]
-    fn snapshot_and_restore() {
-        let mut fs = MemoryFilesystem::new();
-        fs.create_dir("src").unwrap();
-        fs.write_file("src/lib.rs", b"pub mod x;").unwrap();
-        fs.write_file("README.md", b"hi").unwrap();
-
-        let snap = fs.snapshot();
-
-        let mut fs2 = MemoryFilesystem::new();
-        fs2.restore(snap);
-
-        assert_eq!(fs2.read_file("src/lib.rs").unwrap(), b"pub mod x;");
-        assert_eq!(fs2.read_file("README.md").unwrap(), b"hi");
-        assert!(fs2.is_dir("src"));
-    }
-
-    #[test]
-    fn remove_dir_non_empty_fails() {
-        let mut fs = MemoryFilesystem::new();
-        fs.create_dir("d").unwrap();
-        fs.write_file("d/f.txt", b"x").unwrap();
-        assert!(fs.remove_dir("d").is_err());
-    }
-
-    #[test]
-    fn remove_dir_empty_succeeds() {
-        let mut fs = MemoryFilesystem::new();
-        fs.create_dir("d").unwrap();
-        fs.remove_dir("d").unwrap();
-        assert!(!fs.exists("d"));
+        fs.create_dir_all("empty/nested").unwrap();
+        fs.write_file("binary", &[0, 255]).unwrap();
+        let before = fs.snapshot();
+        fs.restore(serde_json::from_str(&serde_json::to_string(&before).unwrap()).unwrap())
+            .unwrap();
+        assert_eq!(fs.snapshot(), before);
+        let mut bad = before.clone();
+        bad.files.push(("binary".into(), vec![]));
+        assert!(fs.restore(bad).is_err());
+        let mut bad = before.clone();
+        bad.directories.remove(0);
+        assert!(fs.restore(bad).is_err());
+        let mut bad = before.clone();
+        bad.files.push(("x/y".into(), vec![]));
+        assert!(fs.restore(bad).is_err());
+        assert_eq!(fs.snapshot(), before);
+        assert!(fs.write_file("large", &vec![0; MAX_BYTES + 1]).is_err());
+        assert_eq!(fs.snapshot(), before);
     }
 }
