@@ -35,6 +35,8 @@ wasm-pack build \
   --out-dir "$PKG_OUT" \
   --release
 
+npm run build
+
 echo ""
 echo "✓ Build complete. Output written to: web/pkg/"
 echo ""
@@ -45,7 +47,7 @@ if [[ "${1:-}" == "--serve" ]]; then
   echo "  (Press Ctrl-C to stop)"
   echo ""
   if command -v npx &>/dev/null; then
-    npx serve "$WEB_DIR" -l 8080
+    npm run serve
   else
     echo "ERROR: npx not found. Install Node.js or use another HTTP server."
     exit 1

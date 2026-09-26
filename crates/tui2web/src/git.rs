@@ -1,10 +1,10 @@
-//! In-memory Git implementation for running TUI applications in the browser.
+//! Optional in-memory Git simulation, not Git interoperability.
 //!
 //! Provides a [`GitRepository`] trait that abstracts common git operations,
 //! plus an [`InMemoryGitRepository`] implementation that operates entirely
 //! on a [`Filesystem`](crate::fs::Filesystem) without requiring a real git
-//! binary or `libgit2`.  This makes it possible to run applications like
-//! *hunky* in a WASM environment where neither is available.
+//! binary or `libgit2`. IDs are counters, history is linear, diffs are text-only,
+//! and there is no object database, repository format, branches, remotes, or transport.
 //!
 //! ## Supported operations
 //!
@@ -20,10 +20,13 @@
 //! | `commit`          | Record a new commit with a message |
 //! | `log`             | List recent commits |
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::fs::{Filesystem, MemoryFilesystem};
+mod review;
+pub use review::{ChangeId, RepositorySnapshot, ReviewFile, ReviewHunk, ReviewLine, ReviewSource};
 
 // ── Error types ──────────────────────────────────────────────────────────────
 
@@ -34,6 +37,10 @@ pub enum GitError {
     NotInitialised,
     /// Nothing to commit (empty staging area).
     NothingToCommit,
+    /// A selection no longer belongs to the current HEAD/worktree/index.
+    StaleSelection,
+    /// Line staging is intentionally limited to UTF-8 text.
+    BinaryFile(String),
     /// A general-purpose error with a human-readable message.
     Other(String),
 }
@@ -43,6 +50,8 @@ impl fmt::Display for GitError {
         match self {
             GitError::NotInitialised => write!(f, "repository not initialised"),
             GitError::NothingToCommit => write!(f, "nothing to commit"),
+            GitError::StaleSelection => write!(f, "stale selection; refresh the diff"),
+            GitError::BinaryFile(path) => write!(f, "line staging requires UTF-8 text: {path}"),
             GitError::Other(msg) => write!(f, "{msg}"),
         }
     }
@@ -150,7 +159,8 @@ pub trait GitRepository {
 type TreeSnapshot = BTreeMap<String, Vec<u8>>;
 
 /// An in-memory commit record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Commit {
     sha: String,
     message: String,
@@ -176,6 +186,7 @@ pub struct InMemoryGitRepository {
     head: TreeSnapshot,
     /// Staging area (index).
     index: TreeSnapshot,
+    index_plans: BTreeMap<String, review::Plan>,
     /// Linear commit history, newest last.
     commits: Vec<Commit>,
     /// Monotonic counter for generating pseudo-SHA identifiers.
@@ -189,6 +200,7 @@ impl InMemoryGitRepository {
             fs,
             head: BTreeMap::new(),
             index: BTreeMap::new(),
+            index_plans: BTreeMap::new(),
             commits: Vec::new(),
             next_id: 1,
         }
@@ -282,8 +294,7 @@ impl GitRepository for InMemoryGitRepository {
         let mut entries = Vec::new();
 
         // Gather all known paths.
-        let mut all_paths: std::collections::BTreeSet<&String> =
-            std::collections::BTreeSet::new();
+        let mut all_paths: std::collections::BTreeSet<&String> = std::collections::BTreeSet::new();
         all_paths.extend(self.head.keys());
         all_paths.extend(self.index.keys());
         all_paths.extend(work.keys());
@@ -317,16 +328,10 @@ impl GitRepository for InMemoryGitRepository {
 
             // Unstaged changes (index → working tree) or (HEAD → working tree
             // for untracked).
-            let baseline = if in_index {
-                self.index.get(path)
-            } else if in_head {
-                self.head.get(path)
-            } else {
-                None
-            };
+            let baseline = self.index.get(path);
 
             match (baseline, in_work) {
-                (None, true) if !in_head && !in_index => {
+                (None, true) => {
                     entries.push(StatusEntry {
                         path: path.clone(),
                         status: FileStatus::Untracked,
@@ -340,7 +345,7 @@ impl GitRepository for InMemoryGitRepository {
                         staged: false,
                     });
                 }
-                (Some(_), false) if !entries.iter().any(|e| e.path == *path && e.staged) => {
+                (Some(_), false) => {
                     entries.push(StatusEntry {
                         path: path.clone(),
                         status: FileStatus::Deleted,
@@ -356,25 +361,7 @@ impl GitRepository for InMemoryGitRepository {
 
     fn diff_unstaged(&self) -> Result<Vec<FileDiff>, GitError> {
         let work = self.working_tree();
-        // Base is the index if it has the file, otherwise HEAD.
-        let mut base = self.head.clone();
-        for (k, v) in &self.index {
-            base.insert(k.clone(), v.clone());
-        }
-        // Remove files that were staged as deleted.
-        for k in self.head.keys() {
-            if !self.index.contains_key(k)
-                && self
-                    .commits
-                    .last()
-                    .map_or(false, |_| !self.index.contains_key(k))
-            {
-                // If index explicitly doesn't have this file but HEAD does,
-                // it was staged as deleted – still use HEAD as the base so
-                // that working-tree additions show up.
-            }
-        }
-        Ok(Self::diff_trees(&base, &work))
+        Ok(Self::diff_trees(&self.index, &work))
     }
 
     fn diff_staged(&self) -> Result<Vec<FileDiff>, GitError> {
@@ -402,27 +389,34 @@ impl GitRepository for InMemoryGitRepository {
 
     fn stage_file(&mut self, path: &str) -> Result<(), GitError> {
         let work = self.working_tree();
+        let mut next = self.index.clone();
         if let Some(data) = work.get(path) {
-            self.index.insert(path.to_string(), data.clone());
+            next.insert(path.to_string(), data.clone());
         } else if self.head.contains_key(path) {
             // File was deleted in working tree – record the deletion in the
             // index by removing it.
-            self.index.remove(path);
+            next.remove(path);
         } else {
             return Err(GitError::Other(format!("file not found: {path}")));
         }
+        review::validate_tree(&next)?;
+        self.index = next;
+        self.record_index_plan(path)?;
         Ok(())
     }
 
     fn unstage_file(&mut self, path: &str) -> Result<(), GitError> {
+        let mut next = self.index.clone();
         if self.head.contains_key(path) {
             // Revert index to HEAD version.
-            self.index
-                .insert(path.to_string(), self.head[path].clone());
+            next.insert(path.to_string(), self.head[path].clone());
         } else {
             // File didn't exist in HEAD – remove from index entirely.
-            self.index.remove(path);
+            next.remove(path);
         }
+        review::validate_tree(&next)?;
+        self.index = next;
+        self.index_plans.remove(path);
         Ok(())
     }
 
@@ -430,15 +424,20 @@ impl GitRepository for InMemoryGitRepository {
         if self.index == self.head {
             return Err(GitError::NothingToCommit);
         }
-        let sha = self.make_sha();
+        let mut next = self.clone();
+        let sha = next.make_sha();
         let commit = Commit {
             sha: sha.clone(),
             message: message.to_string(),
             author: author.to_string(),
             tree: self.index.clone(),
         };
-        self.head = self.index.clone();
-        self.commits.push(commit);
+        next.head = next.index.clone();
+        next.index_plans.clear();
+        next.commits.push(commit);
+        let mut validated = Self::new(MemoryFilesystem::new());
+        validated.restore(next.snapshot())?;
+        *self = next;
         Ok(sha)
     }
 
@@ -505,6 +504,18 @@ fn diff_modified(old: &str, new: &str) -> Vec<DiffHunk> {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
 
+    // Bound the simulation's quadratic LCS table; large files use a replacement hunk.
+    if old_lines.len().saturating_mul(new_lines.len()) > 1_000_000 {
+        return vec![DiffHunk {
+            old_start: 1,
+            new_start: 1,
+            lines: old_lines
+                .iter()
+                .map(|line| format!("-{line}\n"))
+                .chain(new_lines.iter().map(|line| format!("+{line}\n")))
+                .collect(),
+        }];
+    }
     let edit_script = lcs_diff(&old_lines, &new_lines);
 
     // Group consecutive edits into hunks with up to 3 context lines.
@@ -665,6 +676,47 @@ mod tests {
     }
 
     #[test]
+    fn index_is_the_unstaged_baseline_including_deletions() {
+        let mut repo = setup();
+        repo.filesystem_mut().write_file("a", b"one\n").unwrap();
+        repo.stage_file("a").unwrap();
+        repo.commit("first", "test").unwrap();
+        repo.filesystem_mut().remove_file("a").unwrap();
+        repo.stage_file("a").unwrap();
+        assert!(repo.diff_unstaged().unwrap().is_empty());
+        assert_eq!(
+            repo.status().unwrap(),
+            vec![StatusEntry {
+                path: "a".into(),
+                status: FileStatus::Deleted,
+                staged: true,
+            }]
+        );
+        repo.filesystem_mut().write_file("a", b"two\n").unwrap();
+        assert!(repo
+            .status()
+            .unwrap()
+            .iter()
+            .any(|e| !e.staged && e.status == FileStatus::Untracked));
+        repo.stage_file("a").unwrap();
+        repo.filesystem_mut().remove_file("a").unwrap();
+        let status = repo.status().unwrap();
+        assert!(status
+            .iter()
+            .any(|e| e.staged && e.status == FileStatus::Modified));
+        assert!(status
+            .iter()
+            .any(|e| !e.staged && e.status == FileStatus::Deleted));
+    }
+
+    #[test]
+    fn large_diffs_use_bounded_replacement() {
+        let diff = diff_modified(&"old\n".repeat(1001), &"new\n".repeat(1001));
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff[0].lines.len(), 2002);
+    }
+
+    #[test]
     fn status_empty_repo() {
         let repo = setup();
         let st = repo.status().unwrap();
@@ -687,9 +739,7 @@ mod tests {
     #[test]
     fn stage_and_commit() {
         let mut repo = setup();
-        repo.filesystem_mut()
-            .write_file("a.txt", b"hello")
-            .unwrap();
+        repo.filesystem_mut().write_file("a.txt", b"hello").unwrap();
         repo.stage_file("a.txt").unwrap();
 
         // Should show as staged Added.
@@ -755,15 +805,11 @@ mod tests {
     #[test]
     fn log_returns_commits_newest_first() {
         let mut repo = setup();
-        repo.filesystem_mut()
-            .write_file("a.txt", b"v1")
-            .unwrap();
+        repo.filesystem_mut().write_file("a.txt", b"v1").unwrap();
         repo.stage_file("a.txt").unwrap();
         repo.commit("first", "alice").unwrap();
 
-        repo.filesystem_mut()
-            .write_file("a.txt", b"v2")
-            .unwrap();
+        repo.filesystem_mut().write_file("a.txt", b"v2").unwrap();
         repo.stage_file("a.txt").unwrap();
         repo.commit("second", "bob").unwrap();
 
@@ -801,15 +847,11 @@ mod tests {
     #[test]
     fn diff_commit_shows_changes() {
         let mut repo = setup();
-        repo.filesystem_mut()
-            .write_file("f.txt", b"v1\n")
-            .unwrap();
+        repo.filesystem_mut().write_file("f.txt", b"v1\n").unwrap();
         repo.stage_file("f.txt").unwrap();
         let sha1 = repo.commit("first", "test").unwrap();
 
-        repo.filesystem_mut()
-            .write_file("f.txt", b"v2\n")
-            .unwrap();
+        repo.filesystem_mut().write_file("f.txt", b"v2\n").unwrap();
         repo.stage_file("f.txt").unwrap();
         let sha2 = repo.commit("second", "test").unwrap();
 
@@ -836,9 +878,7 @@ mod tests {
     #[test]
     fn file_deletion_status() {
         let mut repo = setup();
-        repo.filesystem_mut()
-            .write_file("f.txt", b"data")
-            .unwrap();
+        repo.filesystem_mut().write_file("f.txt", b"data").unwrap();
         repo.stage_file("f.txt").unwrap();
         repo.commit("add", "test").unwrap();
 

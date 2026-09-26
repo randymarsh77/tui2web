@@ -1,10 +1,11 @@
 use ratatui::{
     backend::{Backend, WindowSize},
     buffer::Cell,
-    layout::{Rect, Size},
+    layout::{Position, Size},
     style::{Color, Modifier},
 };
 use std::io;
+use unicode_width::UnicodeWidthStr;
 
 /// A ratatui [`Backend`] that renders terminal frames as ANSI escape-code strings
 /// suitable for display in a web-based terminal emulator such as xterm.js.
@@ -56,7 +57,9 @@ impl WebBackend {
         let mut out = String::with_capacity(capacity);
 
         // Hide cursor during render to avoid flicker.
-        out.push_str("\x1b[?25l");
+        // Full dirty frames, not a byte stream: reset external state and disable autowrap
+        // so writing the bottom-right cell cannot scroll the screen.
+        out.push_str("\x1b[?25l\x1b[?7l\x1b[0m\x1b[2J");
 
         let mut prev_fg = Color::Reset;
         let mut prev_bg = Color::Reset;
@@ -68,7 +71,8 @@ impl WebBackend {
             push_u16(&mut out, y + 1);
             out.push_str(";1H");
 
-            for x in 0..self.width {
+            let mut x = 0;
+            while x < self.width {
                 let cell = &self.cells[usize::from(y) * usize::from(self.width) + usize::from(x)];
                 let fg = cell.fg;
                 let bg = cell.bg;
@@ -97,6 +101,9 @@ impl WebBackend {
                     if modifier.contains(Modifier::REVERSED) {
                         out.push_str("\x1b[7m");
                     }
+                    if modifier.contains(Modifier::HIDDEN) {
+                        out.push_str("\x1b[8m");
+                    }
                     if modifier.contains(Modifier::CROSSED_OUT) {
                         out.push_str("\x1b[9m");
                     }
@@ -113,17 +120,37 @@ impl WebBackend {
                     prev_modifier = modifier;
                 }
 
-                out.push_str(cell.symbol());
+                let symbol = cell.symbol();
+                let width = UnicodeWidthStr::width(symbol).max(1);
+                // Ratatui reserves the cells following a wide grapheme. Never emit them.
+                // A standalone zero-width symbol, clipped wide glyph, or terminal control
+                // is replaced with a blank rather than changing terminal state.
+                if width > usize::from(self.width - x)
+                    || UnicodeWidthStr::width(symbol) == 0
+                    || symbol.chars().any(char::is_control)
+                {
+                    out.push(' ');
+                    x += 1;
+                } else {
+                    out.push_str(symbol);
+                    x += width as u16;
+                }
             }
         }
 
-        out.push_str("\x1b[0m");
+        out.push_str("\x1b[0m\x1b[?7h");
 
         // Reposition cursor.
         out.push_str("\x1b[");
-        push_u16(&mut out, self.cursor_y + 1);
+        push_u16(
+            &mut out,
+            self.cursor_y.min(self.height.saturating_sub(1)) + 1,
+        );
         out.push(';');
-        push_u16(&mut out, self.cursor_x + 1);
+        push_u16(
+            &mut out,
+            self.cursor_x.min(self.width.saturating_sub(1)) + 1,
+        );
         out.push('H');
 
         if self.cursor_visible {
@@ -251,13 +278,14 @@ impl Backend for WebBackend {
         Ok(())
     }
 
-    fn get_cursor(&mut self) -> io::Result<(u16, u16)> {
-        Ok((self.cursor_x, self.cursor_y))
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        Ok(Position::new(self.cursor_x, self.cursor_y))
     }
 
-    fn set_cursor(&mut self, x: u16, y: u16) -> io::Result<()> {
-        self.cursor_x = x;
-        self.cursor_y = y;
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        let position = position.into();
+        self.cursor_x = position.x;
+        self.cursor_y = position.y;
         Ok(())
     }
 
@@ -268,8 +296,8 @@ impl Backend for WebBackend {
         Ok(())
     }
 
-    fn size(&self) -> io::Result<Rect> {
-        Ok(Rect::new(0, 0, self.width, self.height))
+    fn size(&self) -> io::Result<Size> {
+        Ok(Size::new(self.width, self.height))
     }
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
@@ -291,12 +319,60 @@ impl Backend for WebBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{
-        style::Style,
-        text::Span,
-        widgets::Paragraph,
-        Terminal,
-    };
+    use ratatui::{layout::Rect, style::Style, text::Span, widgets::Paragraph, Terminal};
+
+    #[test]
+    fn actual_terminal_parser_preserves_wide_cells_transitions_and_bottom_edge() {
+        let mut terminal = Terminal::new(WebBackend::new(8, 2)).unwrap();
+        let mut parser = vt100::Parser::new(2, 8, 0);
+        terminal
+            .draw(|f| {
+                f.render_widget(Paragraph::new("界e\u{301}abcZ\n12345678"), f.area());
+                f.set_cursor_position((7, 1));
+            })
+            .unwrap();
+        parser.process(terminal.backend().get_ansi_output().as_bytes());
+        assert_eq!(parser.screen().cell(0, 0).unwrap().contents(), "界");
+        assert!(parser.screen().cell(0, 1).unwrap().is_wide_continuation());
+        assert_eq!(parser.screen().cell(0, 2).unwrap().contents(), "e\u{301}");
+        assert_eq!(parser.screen().cell(1, 7).unwrap().contents(), "8");
+        assert_eq!(parser.screen().cursor_position(), (1, 7));
+        assert!(!parser.screen().hide_cursor());
+        terminal
+            .draw(|f| f.render_widget(Paragraph::new("ab界"), f.area()))
+            .unwrap();
+        parser.process(terminal.backend().get_ansi_output().as_bytes());
+        assert_eq!(parser.screen().cell(0, 0).unwrap().contents(), "a");
+        assert_eq!(parser.screen().cell(0, 2).unwrap().contents(), "界");
+        assert!(parser
+            .screen()
+            .cell(1, 7)
+            .unwrap()
+            .contents()
+            .trim()
+            .is_empty());
+        assert!(parser.screen().hide_cursor());
+        terminal.backend_mut().resize(4, 1);
+        terminal.resize(Rect::new(0, 0, 4, 1)).unwrap();
+        parser.set_size(1, 4);
+        terminal
+            .draw(|f| f.render_widget(Paragraph::new("abc界"), f.area()))
+            .unwrap();
+        parser.process(terminal.backend().get_ansi_output().as_bytes());
+        assert_eq!(parser.screen().contents(), "abc ");
+    }
+
+    #[test]
+    fn control_symbols_cannot_inject_terminal_commands() {
+        let mut backend = WebBackend::new(4, 1);
+        let mut cell = Cell::default();
+        cell.set_symbol("\x1b]52;c;bad\x07")
+            .set_style(Style::default().add_modifier(Modifier::HIDDEN));
+        backend.draw(std::iter::once((0, 0, &cell))).unwrap();
+        backend.flush().unwrap();
+        assert!(!backend.get_ansi_output().contains("]52"));
+        assert!(backend.get_ansi_output().contains("\x1b[8m"));
+    }
 
     #[test]
     fn backend_size_matches_constructor() {
@@ -313,12 +389,15 @@ mod tests {
         terminal
             .draw(|f| {
                 let widget = Paragraph::new("hello");
-                f.render_widget(widget, f.size());
+                f.render_widget(widget, f.area());
             })
             .unwrap();
         let ansi = terminal.backend().get_ansi_output();
         assert!(!ansi.is_empty(), "expected non-empty ANSI output");
-        assert!(ansi.contains("hello"), "expected cell content in ANSI output");
+        assert!(
+            ansi.contains("hello"),
+            "expected cell content in ANSI output"
+        );
     }
 
     #[test]
@@ -360,12 +439,18 @@ mod tests {
                     "styled",
                     Style::default().fg(Color::Red).bg(Color::Blue),
                 ));
-                f.render_widget(widget, f.size());
+                f.render_widget(widget, f.area());
             })
             .unwrap();
         let ansi = terminal.backend().get_ansi_output();
         // Red fg = ESC[31m, Blue bg = ESC[44m
-        assert!(ansi.contains("\x1b[31m"), "expected red foreground escape code");
-        assert!(ansi.contains("\x1b[44m"), "expected blue background escape code");
+        assert!(
+            ansi.contains("\x1b[31m"),
+            "expected red foreground escape code"
+        );
+        assert!(
+            ansi.contains("\x1b[44m"),
+            "expected blue background escape code"
+        );
     }
 }

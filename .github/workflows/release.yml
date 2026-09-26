@@ -1,0 +1,81 @@
+name: Publish packages
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing immutable vX.Y.Z tag to retry (must be merged into master)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'randymarsh77/tui2web'
+    runs-on: ubuntu-latest
+    environment: package-release
+    timeout-minutes: 45
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Validate immutable tag and package versions
+        run: node scripts/release.mjs validate
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace --all-features
+      - run: cargo install wasm-pack --version 0.15.0 --locked
+      - run: ./build.sh
+      - run: npm run typecheck && npm test && npm run test:terminal
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - name: Build and test exact registry artifacts
+        run: node scripts/release.mjs package
+      - name: Retain tested artifacts before publication
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ env.RELEASE_TAG }}
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: true
+          path: |
+            .release/*.crate
+            .release/*.tgz
+            .release/manifest.json
+      - name: Publish or verify identical existing versions
+        run: node scripts/release.mjs publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Retain partial or complete release receipt
+        if: ${{ always() && hashFiles('.release/receipt.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-receipt-${{ env.RELEASE_TAG }}
+          path: .release/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: true
