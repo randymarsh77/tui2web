@@ -7,7 +7,7 @@ export interface IsolatedOptions extends Omit<MountOptions, "workerUrl" | "worke
   runtimeBaseUrl?: string | URL;
 }
 /** An opaque-origin frame runs trusted host code; only its network-denied Worker imports app glue.
- * Browser memory/process limits still apply. See README's security contract before embedding.
+ * Browser memory/process limits still apply. See docs/isolation.md before embedding.
  */
 export async function mountIsolated(element: HTMLElement, options: IsolatedOptions): Promise<Handle> {
   const base = options.runtimeBaseUrl ?? new URL("./", import.meta.url);
