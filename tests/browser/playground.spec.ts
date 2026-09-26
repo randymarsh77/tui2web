@@ -107,6 +107,18 @@ test("isolated frame loads on a static host, denies network and mediates persist
     try { localStorage.setItem("bad", "bad"); } catch { storageDenied = true; }
     return { parentDenied, networkDenied, storageDenied };
   })).toEqual({ parentDenied: true, networkDenied: true, storageDenied: true });
+  await page.setViewportSize({ width: 390, height: 900 });
+  await expect.poll(async () => {
+    const outer = (await iframe.boundingBox())!;
+    const screen = (await page.frameLocator("iframe").locator(".xterm-screen").boundingBox())!;
+    return screen.width <= outer.width && screen.width < 390;
+  }).toBe(true);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expect.poll(async () => {
+    const outer = (await iframe.boundingBox())!;
+    const screen = (await page.frameLocator("iframe").locator(".xterm-screen").boundingBox())!;
+    return screen.width <= outer.width && screen.width > 600;
+  }).toBe(true);
   await page.evaluate(() => window.playground.handles[1].reset());
   expect(await file(page, 1)).toMatch(/^Welcome/);
   await page.evaluate(() => window.playground.handles[1].dispose());
