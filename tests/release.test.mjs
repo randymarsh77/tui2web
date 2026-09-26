@@ -55,12 +55,20 @@ test("conflicts, yanks, network errors and corrupt downloads fail closed", async
   }
 });
 
-test("publication refuses local execution before looking for any credentials", async () => {
+test("publication refuses local and foreign-repository execution before credentials", async () => {
   const previous = process.env.GITHUB_ACTIONS;
+  const previousRepo = process.env.GITHUB_REPOSITORY;
   delete process.env.GITHUB_ACTIONS;
-  try { await assert.rejects(main("publish"), /only in GitHub Actions/); }
+  try {
+    await assert.rejects(main("publish"), /only in GitHub Actions/);
+    process.env.GITHUB_ACTIONS = "true";
+    process.env.GITHUB_REPOSITORY = "someone/else";
+    await assert.rejects(main("publish"), /owning repository/);
+  }
   finally {
     if (previous === undefined) delete process.env.GITHUB_ACTIONS;
     else process.env.GITHUB_ACTIONS = previous;
+    if (previousRepo === undefined) delete process.env.GITHUB_REPOSITORY;
+    else process.env.GITHUB_REPOSITORY = previousRepo;
   }
 });

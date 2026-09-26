@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.repository == 'randymarsh77/tui2web'
     runs-on: ubuntu-latest
     environment: package-release
     timeout-minutes: 45

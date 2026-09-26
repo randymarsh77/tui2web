@@ -169,6 +169,7 @@ export async function inspectRemote(manifest, fetcher = fetch) {
 
 async function publish() {
   assert.ok(process.env.GITHUB_ACTIONS === "true", "Publication is supported only in GitHub Actions");
+  assert.equal(process.env.GITHUB_REPOSITORY, "randymarsh77/tui2web", "Publication is restricted to the owning repository");
   const build = await identity(true);
   for (const name of ["CARGO_REGISTRY_TOKEN", "NODE_AUTH_TOKEN"]) {
     assert.ok(process.env[name], `Missing ${name} (configure the documented GitHub Actions secrets)`);
