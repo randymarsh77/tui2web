@@ -25,7 +25,7 @@ Add a second independent editor or an isolated editor. Namespaces are stable acr
 
 ## Consumer: Rust
 
-Version pairing is deliberate: **Ratatui 0.26.3**, `unicode-width` 0.1.14, **xterm 5.5.0**, fit 0.10.0, Unicode11 addon 0.8.0. Keep the Cargo/npm lockfiles. Upgrading Ratatui or Unicode providers requires rerunning the real-terminal tests.
+Version pairing is deliberate: **Ratatui 0.29.0**, `unicode-width` 0.2.0, **xterm 5.5.0**, fit 0.10.0, Unicode11 addon 0.8.0. Ratatui 0.29 matches the real hunky consumer. Keep the Cargo/npm lockfiles. Upgrading Ratatui or Unicode providers requires rerunning the real-terminal tests.
 
 ```toml
 [package]
@@ -38,7 +38,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 tui2web = { path = "../tui2web/crates/tui2web", features = ["wasm"] }
-ratatui = { version = "0.26", default-features = false }
+ratatui = { version = "0.29", default-features = false }
 wasm-bindgen = "0.2"
 ```
 
@@ -63,7 +63,7 @@ impl Application for Greeting {
         }
     }
     fn render(&self, frame: &mut Frame, _: &Context) {
-        frame.render_widget(Paragraph::new(self.0.as_str()), frame.size());
+        frame.render_widget(Paragraph::new(self.0.as_str()), frame.area());
     }
 }
 tui2web::export_app!(Greeting);
@@ -159,7 +159,15 @@ This is a practical static-host option, **not an adversarial multi-tenant comput
 
 ## Optional Git simulation
 
-`tui2web` defaults to no Git. Enable its `git` Cargo feature for the legacy educational `InMemoryGitRepository`. It has linear in-memory history, counter-based pseudo-identifiers and text diffs, not Git objects, real hashes, branches, remotes, `.git` compatibility or transport. Index/working-tree and staged-deletion semantics are corrected; quadratic LCS work is bounded and large diffs use a full replacement hunk. It is not used by the core runtime/editor.
+`tui2web` defaults to no Git. Enable its `git` Cargo feature for `InMemoryGitRepository`, the seeded simulation used by the adapted hunky review UI. It has linear in-memory history, counter-based pseudo-identifiers and text diffs, not Git objects, real hashes, branches, remotes, `.git` compatibility or transport. The core runtime/file editor does not require it.
+
+The repository owns independent HEAD, index and working trees. `filesystem_mut()` changes only the working filesystem; `Clone` is a deep copy. `GitRepository` provides whole-file stage/unstage, index-to-worktree and HEAD-to-index diffs, commit and history. `review()` additionally returns HEAD-to-worktree `ReviewFile`/`ReviewHunk`/`ReviewLine` values, with three context lines, staged flags and opaque `ChangeId` selections. `ReviewSource::IndexOnly` exposes staged edits that are no longer present in the working tree, including a worktree reverted to HEAD. Include the source in UI hunk/cache identities.
+
+`stage_change`, `unstage_change`, `discard_change` and atomic `toggle_hunk` operate on those IDs rather than mutable display offsets. IDs anchor deletions to HEAD lines and insertions to HEAD gaps, text and duplicate occurrence; retained index provenance preserves partial selections. Adjacent distinct inserted lines do not invalidate existing insertion IDs. Reordered identical lines use deterministic canonical occurrence identities. A changed HEAD or a removed/replaced operation rejects stale selections. Staging a new insertion supersedes obsolete index-only insertions at that same HEAD gap, while preserving staged groups elsewhere. Discard reverses a selected HEAD-to-worktree edit without changing the index. This is a deliberately specified simulation, not libgit2's patch engine.
+
+Line review requires UTF-8 and retains LF/no-final-LF data. Empty-file adds/removes use a selectable `[empty file]` metadata line. Whole-file operations also support binary bytes; requesting text review for a changed binary file returns `GitError::BinaryFile`. Quadratic LCS tables are bounded; large diffs use replacement edits rather than unbounded allocation.
+
+`RepositorySnapshot` captures version 1, the complete working filesystem (including empty directories), HEAD, index, selection provenance, linear commit history and counter. It round-trips through serde and `restore` validates atomically, including history/HEAD consistency and edit provenance. Each tree has the filesystem's quotas; snapshots are limited to 16 MiB serialized JSON and 64 commits. Commits that exceed those limits fail without mutation. This repository snapshot is separate from the runtime's filesystem snapshot; apps may serialize it into their own virtual files or implement an explicit restore policy. It does not silently persist or restore repository state.
 
 ## Verification and layout
 

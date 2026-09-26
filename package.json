@@ -4,6 +4,14 @@
   "type": "module",
   "description": "Browser-local host for adapted Ratatui WASM apps",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/randymarsh77/tui2web.git"
+  },
+  "homepage": "https://github.com/randymarsh77/tui2web#readme",
+  "bugs": "https://github.com/randymarsh77/tui2web/issues",
+  "engines": { "node": ">=22" },
+  "publishConfig": { "access": "public" },
   "files": ["dist"],
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
@@ -12,6 +20,7 @@
     "./frame.js": "./dist/frame.js"
   },
   "scripts": {
+    "prepack": "npm run build",
     "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
     "build:wasm": "wasm-pack build example --target web --out-dir ../web/pkg --release",
     "typecheck": "tsc --noEmit",

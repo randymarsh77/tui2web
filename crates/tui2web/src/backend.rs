@@ -1,7 +1,7 @@
 use ratatui::{
     backend::{Backend, WindowSize},
     buffer::Cell,
-    layout::{Rect, Size},
+    layout::{Position, Size},
     style::{Color, Modifier},
 };
 use std::io;
@@ -278,13 +278,14 @@ impl Backend for WebBackend {
         Ok(())
     }
 
-    fn get_cursor(&mut self) -> io::Result<(u16, u16)> {
-        Ok((self.cursor_x, self.cursor_y))
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        Ok(Position::new(self.cursor_x, self.cursor_y))
     }
 
-    fn set_cursor(&mut self, x: u16, y: u16) -> io::Result<()> {
-        self.cursor_x = x;
-        self.cursor_y = y;
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        let position = position.into();
+        self.cursor_x = position.x;
+        self.cursor_y = position.y;
         Ok(())
     }
 
@@ -295,8 +296,8 @@ impl Backend for WebBackend {
         Ok(())
     }
 
-    fn size(&self) -> io::Result<Rect> {
-        Ok(Rect::new(0, 0, self.width, self.height))
+    fn size(&self) -> io::Result<Size> {
+        Ok(Size::new(self.width, self.height))
     }
 
     fn window_size(&mut self) -> io::Result<WindowSize> {
@@ -318,7 +319,7 @@ impl Backend for WebBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{style::Style, text::Span, widgets::Paragraph, Terminal};
+    use ratatui::{layout::Rect, style::Style, text::Span, widgets::Paragraph, Terminal};
 
     #[test]
     fn actual_terminal_parser_preserves_wide_cells_transitions_and_bottom_edge() {
@@ -326,8 +327,8 @@ mod tests {
         let mut parser = vt100::Parser::new(2, 8, 0);
         terminal
             .draw(|f| {
-                f.render_widget(Paragraph::new("界e\u{301}abcZ\n12345678"), f.size());
-                f.set_cursor(7, 1);
+                f.render_widget(Paragraph::new("界e\u{301}abcZ\n12345678"), f.area());
+                f.set_cursor_position((7, 1));
             })
             .unwrap();
         parser.process(terminal.backend().get_ansi_output().as_bytes());
@@ -338,7 +339,7 @@ mod tests {
         assert_eq!(parser.screen().cursor_position(), (1, 7));
         assert!(!parser.screen().hide_cursor());
         terminal
-            .draw(|f| f.render_widget(Paragraph::new("ab界"), f.size()))
+            .draw(|f| f.render_widget(Paragraph::new("ab界"), f.area()))
             .unwrap();
         parser.process(terminal.backend().get_ansi_output().as_bytes());
         assert_eq!(parser.screen().cell(0, 0).unwrap().contents(), "a");
@@ -355,7 +356,7 @@ mod tests {
         terminal.resize(Rect::new(0, 0, 4, 1)).unwrap();
         parser.set_size(1, 4);
         terminal
-            .draw(|f| f.render_widget(Paragraph::new("abc界"), f.size()))
+            .draw(|f| f.render_widget(Paragraph::new("abc界"), f.area()))
             .unwrap();
         parser.process(terminal.backend().get_ansi_output().as_bytes());
         assert_eq!(parser.screen().contents(), "abc ");
@@ -388,7 +389,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let widget = Paragraph::new("hello");
-                f.render_widget(widget, f.size());
+                f.render_widget(widget, f.area());
             })
             .unwrap();
         let ansi = terminal.backend().get_ansi_output();
@@ -438,7 +439,7 @@ mod tests {
                     "styled",
                     Style::default().fg(Color::Red).bg(Color::Blue),
                 ));
-                f.render_widget(widget, f.size());
+                f.render_widget(widget, f.area());
             })
             .unwrap();
         let ansi = terminal.backend().get_ansi_output();

@@ -25,16 +25,16 @@ fn main() {
                     )),
                     Line::from("123456789Z"),
                 ]),
-                f.size(),
+                f.area(),
             );
-            f.set_cursor(9, 2);
+            f.set_cursor_position((9, 2));
         })
         .unwrap();
     frames.push(
         serde_json::json!({"columns":10, "rows":3, "ansi":terminal.backend().get_ansi_output()}),
     );
     terminal
-        .draw(|f| f.render_widget(Paragraph::new("ab界"), f.size()))
+        .draw(|f| f.render_widget(Paragraph::new("ab界"), f.area()))
         .unwrap();
     frames.push(
         serde_json::json!({"columns":10, "rows":3, "ansi":terminal.backend().get_ansi_output()}),
@@ -43,7 +43,7 @@ fn main() {
         terminal.backend_mut().resize(width, height);
         terminal.resize(Rect::new(0, 0, width, height)).unwrap();
         terminal
-            .draw(|f| f.render_widget(Paragraph::new(text), f.size()))
+            .draw(|f| f.render_widget(Paragraph::new(text), f.area()))
             .unwrap();
         frames.push(serde_json::json!({"columns":width, "rows":height, "ansi":terminal.backend().get_ansi_output()}));
     }

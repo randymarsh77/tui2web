@@ -336,7 +336,7 @@ impl Application for Editor {
         );
         let (row, col) = self.position();
         if editor.width > 2 && editor.height > 2 {
-            frame.set_cursor(editor.x + 1 + (col - left) as u16, 1 + (row - top) as u16);
+            frame.set_cursor_position((editor.x + 1 + (col - left) as u16, 1 + (row - top) as u16));
         }
     }
 }
