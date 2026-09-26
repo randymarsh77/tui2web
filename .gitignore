@@ -10,6 +10,7 @@
 # Node
 node_modules/
 /dist/
+/.release/
 /web/runtime/
 /web/main.js
 /test-results/

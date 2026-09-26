@@ -35,6 +35,8 @@ jobs:
       - run: npm run typecheck && npm test && npm run test:terminal
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
+      - name: Verify publishable artifacts without publishing
+        run: node scripts/release.mjs package
       - uses: actions/upload-artifact@v4
         with:
           name: static-playground

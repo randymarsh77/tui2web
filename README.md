@@ -75,7 +75,7 @@ Build with `wasm-pack build --target web`. `export_app!` emits the stable `App(i
 
 ## Consumer: JavaScript / TypeScript
 
-This repository is the **unpublished** `@tui2web/runtime` package. `npm run build` produces `dist/` with bundled JS, declarations, CSS, Worker and isolated-frame entrypoints. Use a local file dependency or copy `dist/` to your static site; no package publication is required.
+This repository builds the `@tui2web/runtime` package. `npm run build` produces `dist/` with bundled JS, declarations, CSS, Worker and isolated-frame entrypoints. Until the first verified registry release, use an immutable Git dependency, a local file dependency or copy `dist/` to your static site. Git installs build assets through npm's `prepare` lifecycle.
 
 ```html
 <link rel="stylesheet" href="./runtime/style.css">
@@ -183,6 +183,58 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-`crates/tui2web` contains the backend, app adapter and memory filesystem; `runtime/` the package; `example/` the adapted Rust app; `web/` the static demo; `tests/` and `scripts/check-terminal.mjs` exercise the public API. CI runs the checks above and uploads the static site artifact on PRs and pushes to the actual default branch, `master`. The previous `main`-triggered Pages deployment workflow is replaced with validation-only CI; nothing is published or deployed.
+`crates/tui2web` contains the backend, app adapter and memory filesystem; `runtime/` the package; `example/` the adapted Rust app; `web/` the static demo; `tests/` and `scripts/check-terminal.mjs` exercise the public API. `.github/workflows/ci.yml` runs the checks above, verifies publishable artifacts without uploading to registries, and uploads the static site artifact on PRs and pushes to the actual default branch, `master`. Ordinary CI does not publish or deploy.
+
+## Publishing through GitHub Actions
+
+**Publication happens only through `.github/workflows/release.yml` (`Publish packages`), never through local registry login.** The workflow publishes **`tui2web` on crates.io** and **`@tui2web/runtime` on npm**, both with the exact version selected by a stable `vX.Y.Z` tag. It does not merge PRs, deploy a website, create tags, or create GitHub Releases. Hunky remains on its validated Git-pinned review candidate until **both** registry artifacts are verified by a successful workflow receipt.
+
+### One-time owner setup
+
+Create the GitHub Actions environment **`package-release`** in this repository. Add these environment secrets (repository Actions secrets with the same names also work):
+
+| Secret | Required authorization |
+|---|---|
+| `CARGO_REGISTRY_TOKEN` | A crates.io API token for an account authorized to publish `tui2web`. The first release needs permission to publish a new crate; later releases need publish/update permission for this crate. Existing crate ownership must belong to the intended account/team. |
+| `NPM_TOKEN` | A supported npm **granular access token** with read/write package permissions for `@tui2web/runtime` (or the `@tui2web` scope), including first-package creation. For unattended CI on a 2FA-protected account, enable the token's supported **bypass 2FA** capability. Do not require an interactive OTP. Respect any token IP restrictions/expiration and rotate as needed. |
+
+The npm account must belong to the **`tui2web` npm organization** with package creation/write rights. An unclaimed package name does **not** establish ownership of its scope. Resolve namespace ownership before triggering; the workflow never renames packages. It publishes npm with `--access public`. `actions/setup-node` consumes `NODE_AUTH_TOKEN`, which the publish step maps from the GitHub secret **`NPM_TOKEN`**; do not create a differently named secret by accident.
+
+Protect the `package-release` environment with selected release tags (`v*`) and, preferably, required reviewers. Configure a tag ruleset preventing updates/deletion of `v*` tags so release refs remain immutable. Keep GitHub's workflow/branch review protections enabled. The workflow token has only `contents: read`; no write or OIDC permission is required. Registry tokens are passed only to the final publish step, not dependency installation, build scripts, tests, PRs or ordinary pushes. It uses token authentication rather than npm trusted publishing/provenance; enabling OIDC is a separate future policy change.
+
+### First release and later versions
+
+1. Merge the reviewed release workflow and validated implementation into `master`. Do not tag a feature-branch-only commit: the workflow requires the tag commit to be an ancestor of `origin/master`.
+2. Set the **same version** in `crates/tui2web/Cargo.toml`, `example/Cargo.toml`, root `package.json`, and the root entry in `package-lock.json`; update/commit `Cargo.lock` and `package-lock.json` with the package managers. The initial candidate is `0.1.0`. Commit version changes through the normal reviewed PR workflow.
+3. After the secrets/ownership/protections above are configured and the intended commit is merged, create and push the immutable tag:
+
+```sh
+git fetch origin master
+git tag -a v0.1.0 origin/master -m "tui2web 0.1.0"
+git push origin refs/tags/v0.1.0
+```
+
+Do **not** execute those commands before secrets are configured. The tag push is the publication trigger; ordinary pushes and PRs never publish. Only stable `vX.Y.Z` tags are accepted (no prerelease suffixes). Both package names, all package versions, the lockfile root version, the checked-out tag commit, and the workflow ref must agree.
+
+The release job pins Rust **1.98.1**, Node **24.19.0** and wasm-pack **0.15.0**, then runs formatting, Clippy, Rust tests, the WASM/site build, TypeScript checks, JavaScript/release-guard tests, real-terminal parsing and Chromium end-to-end tests. It builds/verifies the Cargo archive with all features, exercises Cargo's publish repack path using **`--dry-run`**, packs npm's already-built assets without lifecycle scripts, and installs/typechecks that exact npm tarball in a clean consumer. No credentials are needed for these steps.
+
+Before any upload to a registry, `release-artifacts-vX.Y.Z` is retained in Actions for 90 days: the exact `.crate` and `.tgz`, plus `manifest.json` containing the commit, tag, version and SHA-256/SHA-512 checksums. Cargo's embedded VCS record and npm's `dist/release.json` identify the same source commit. npm publishes the tested tarball directly. Cargo publishes from the same clean immutable checkout; the dry run first proves the repack is byte-identical to the tested archive, and publication verifies the resulting archive again.
+
+### Partial failure and safe retry
+
+Cargo publishes first, then npm. A successful Cargo upload followed by an npm failure is a **partial release**, not overall success. The step summary and `release-receipt-vX.Y.Z` artifact record which packages were publicly verified and which publication attempts remain uncertain.
+
+Fix secret permissions, token expiry, transient registry access or environment approval, then retry the **same immutable tag**:
+
+```sh
+gh workflow run release.yml --ref v0.1.0 -f release_tag=v0.1.0
+gh run list --workflow release.yml --limit 5
+```
+
+The dispatch must run the workflow **from the tag itself**, not a newer branch, so it cannot silently substitute a different publisher/build script. It rebuilds with the locked source/toolchain. Both registries are checked before either write: an existing version is skipped **only** when its registry checksum and downloaded archive match the expected local artifact byte-for-byte. The local archives must also identify the expected source/tag. No "version exists" error is blindly ignored.
+
+HTTP errors other than an absent version, yanked Cargo versions, unexpected npm artifact origins, malformed registry responses, source mismatches, or different archive bytes **fail closed**. A registry may take time to expose an upload publicly; an uncertain verification fails the run and requires the exact-tag retry. Do not delete/recreate/move a tag, overwrite a published version, disable the checks, or switch to local publishing to recover. Compare the retained artifacts/manifest and registry state. If identical artifacts cannot be reproduced or the existing version genuinely differs, resolve that explicitly with maintainers and prepare a **new version and new reviewed tag** instead.
+
+After both packages are verified, send the successful run URL, immutable source SHA and receipt to downstream consumers. Hunky can then switch to the actual published versions and re-run its clean consumer/site checks. An optional GitHub Release can be created manually from that **already published tag** (`gh release create v0.1.0 --verify-tag ...`) after success; it is not required and this workflow intentionally lacks permission to create it.
 
 MIT. See [LICENSE](LICENSE).

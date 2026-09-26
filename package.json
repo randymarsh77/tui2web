@@ -24,7 +24,7 @@
     "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
     "build:wasm": "wasm-pack build example --target web --out-dir ../web/pkg --release",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts tests/*.test.mjs",
     "test:terminal": "cargo run --quiet -p tui2web --example frames | node scripts/check-terminal.mjs",
     "test:e2e": "playwright test",
     "serve": "serve web -l 8080"
